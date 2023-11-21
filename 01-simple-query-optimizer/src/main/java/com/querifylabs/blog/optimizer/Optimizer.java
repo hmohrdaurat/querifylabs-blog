@@ -11,18 +11,19 @@ import org.apache.calcite.plan.ConventionTraitDef;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptCostImpl;
 import org.apache.calcite.plan.RelTraitSet;
-import org.apache.calcite.plan.volcano.VolcanoPlanner;
 import org.apache.calcite.prepare.CalciteCatalogReader;
 import org.apache.calcite.prepare.Prepare;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelRoot;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
+import org.apache.calcite.sql.SqlFilterOperator;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlOperatorTable;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.parser.SqlParser;
 import org.apache.calcite.sql.util.ChainedSqlOperatorTable;
+import org.apache.calcite.sql.util.ListSqlOperatorTable;
 import org.apache.calcite.sql.validate.SqlValidator;
 import org.apache.calcite.sql.validate.SqlValidatorUtil;
 import org.apache.calcite.sql2rel.SqlToRelConverter;
@@ -33,6 +34,7 @@ import org.apache.calcite.tools.RuleSet;
 import org.apache.calcite.tools.RuleSets;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Properties;
 
 public class Optimizer {
@@ -40,13 +42,13 @@ public class Optimizer {
     private final CalciteConnectionConfig config;
     private final SqlValidator validator;
     private final SqlToRelConverter converter;
-    private final VolcanoPlanner planner;
+    private final CustomCostPlanner planner;
 
     public Optimizer(
         CalciteConnectionConfig config,
         SqlValidator validator,
         SqlToRelConverter converter,
-        VolcanoPlanner planner
+        CustomCostPlanner planner
     ) {
         this.config = config;
         this.validator = validator;
@@ -72,7 +74,10 @@ public class Optimizer {
             config
         );
 
-        SqlOperatorTable operatorTable = ChainedSqlOperatorTable.of(SqlStdOperatorTable.instance());
+        //SqlOperatorTable operatorTable = ChainedSqlOperatorTable.of(SqlStdOperatorTable.instance());
+        ListSqlOperatorTable opList = new ListSqlOperatorTable();
+        opList.add(new SqlFilterOperator());
+        SqlOperatorTable operatorTable = opList;
 
         SqlValidator.Config validatorConfig = SqlValidator.Config.DEFAULT
             .withLenientOperatorLookup(config.lenientOperatorLookup())
@@ -82,7 +87,7 @@ public class Optimizer {
 
         SqlValidator validator = SqlValidatorUtil.newValidator(operatorTable, catalogReader, typeFactory, validatorConfig);
 
-        VolcanoPlanner planner = new VolcanoPlanner(RelOptCostImpl.FACTORY, Contexts.of(config));
+        CustomCostPlanner planner = new CustomCostPlanner(CustomCost.FACTORY, Contexts.of(config));
         planner.addRelTraitDef(ConventionTraitDef.INSTANCE);
 
         RelOptCluster cluster = RelOptCluster.create(planner, new RexBuilder(typeFactory));
