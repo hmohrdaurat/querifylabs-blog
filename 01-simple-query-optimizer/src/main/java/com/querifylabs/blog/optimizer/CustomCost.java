@@ -42,7 +42,7 @@ public class CustomCost implements RelOptCost {
 
   public static final RelOptCostFactory FACTORY = new Factory();
 
-  final boolean UseCPUCostOnly = true;
+  final boolean UseCPUCostOnly = false;//true;
 
   //~ Instance fields --------------------------------------------------------
 

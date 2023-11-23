@@ -39,6 +39,18 @@
             <version>${junit.version}</version>
             <scope>test</scope>
         </dependency>
+    
+      <dependency>
+        <groupId>org.apache.calcite</groupId>
+        <artifactId>calcite-testkit</artifactId>
+        <version>1.29.0</version>
+      </dependency>
+    
+      <dependency>
+        <groupId>org.apache.calcite</groupId>
+        <artifactId>calcite-plus</artifactId>
+        <version>1.13.0</version>
+      </dependency>
     </dependencies>
 
     <build>
