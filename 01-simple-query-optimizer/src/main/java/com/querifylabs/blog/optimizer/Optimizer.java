@@ -16,16 +16,22 @@ import org.apache.calcite.plan.RelOptPlanner;
 import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.plan.RelTraitSet;
+import org.apache.calcite.plan.hep.HepPlanner;
+import org.apache.calcite.plan.hep.HepProgram;
 import org.apache.calcite.plan.hep.HepProgramBuilder;
 import org.apache.calcite.plan.volcano.VolcanoPlanner;
 import org.apache.calcite.prepare.CalciteCatalogReader;
 import org.apache.calcite.prepare.Prepare;
+import org.apache.calcite.rel.RelCollationTraitDef;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelRoot;
+import org.apache.calcite.rel.externalize.RelWriterImpl;
+import org.apache.calcite.rel.rules.CoreRules;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.schema.Schema;
 import org.apache.calcite.schema.Table;
+import org.apache.calcite.sql.SqlExplainLevel;
 import org.apache.calcite.sql.SqlFilterOperator;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlOperatorTable;
@@ -37,11 +43,18 @@ import org.apache.calcite.sql.validate.SqlValidator;
 import org.apache.calcite.sql.validate.SqlValidatorUtil;
 import org.apache.calcite.sql2rel.SqlToRelConverter;
 import org.apache.calcite.sql2rel.StandardConvertletTable;
+import org.apache.calcite.test.CalciteAssert;
+import org.apache.calcite.tools.FrameworkConfig;
+import org.apache.calcite.tools.Frameworks;
 import org.apache.calcite.tools.Program;
 import org.apache.calcite.tools.Programs;
+import org.apache.calcite.tools.RelBuilder;
 import org.apache.calcite.tools.RuleSet;
 import org.apache.calcite.tools.RuleSets;
 
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
@@ -53,17 +66,20 @@ public class Optimizer {
     private final SqlValidator validator;
     private final SqlToRelConverter converter;
     private final RelOptPlanner planner;
+    private final Prepare.CatalogReader catalogReader;
 
     public Optimizer(
         CalciteConnectionConfig config,
         SqlValidator validator,
         SqlToRelConverter converter,
-        RelOptPlanner planner
+        RelOptPlanner planner,
+        Prepare.CatalogReader catalogReader
     ) {
         this.config = config;
         this.validator = validator;
         this.converter = converter;
         this.planner = planner;
+        this.catalogReader = catalogReader;
     }
 
     public static Optimizer create(String schemaName, Schema schema) {
@@ -98,6 +114,7 @@ public class Optimizer {
 
         CustomCostPlanner planner = new CustomCostPlanner(CustomCost.FACTORY, Contexts.of(config));            
         planner.addRelTraitDef(ConventionTraitDef.INSTANCE);
+        planner.addRelTraitDef(RelCollationTraitDef.INSTANCE);
         RelOptUtil.registerDefaultRules(planner, false, false);
 
         RelOptCluster cluster = RelOptCluster.create(planner, new RexBuilder(typeFactory));
@@ -116,7 +133,7 @@ public class Optimizer {
             converterConfig
         );
 
-        return new Optimizer(config, validator, converter, planner);
+        return new Optimizer(config, validator, converter, planner, catalogReader);
     }
 
     public SqlNode parse(String sql) throws Exception {
@@ -141,6 +158,16 @@ public class Optimizer {
         return root.rel;
     }
 
+    private class CustomBuilder extends RelBuilder {
+        public CustomBuilder() {
+            super(planner.getContext(), converter.getCluster(), catalogReader);
+        }
+    }
+
+    public RelBuilder builder() {
+        return new CustomBuilder();
+    }
+
     public RelNode optimize(RelNode node, RelTraitSet requiredTraitSet, RuleSet rules) {
         /*Program program = Programs.of(RuleSets.ofList(rules));
 
@@ -155,13 +182,38 @@ public class Optimizer {
         for (RelOptRule rule : rules) {
             planner.addRule(rule);
         }
-        // caused NullPointer crash:
-        planner.removeRule(EnumerableRules.ENUMERABLE_MERGE_JOIN_RULE);
+
+        //planner.removeRule(EnumerableRules.ENUMERABLE_MERGE_JOIN_RULE);
+        //planner.removeRule(EnumerableRules.ENUMERABLE_JOIN_RULE);
+
+        // for tests
+        planner.removeRule(CoreRules.SORT_JOIN_TRANSPOSE);
+        //planner.removeRule(CoreRules.SORT_PROJECT_TRANSPOSE);
+        planner.removeRule(CoreRules.SORT_REMOVE);
+        planner.removeRule(CoreRules.SORT_JOIN_COPY);
+        
+        print("LOGICAL PLAN", node);
 
         RelNode newRoot = planner.changeTraits(node, requiredTraitSet);
         planner.setRoot(newRoot);
         RelNode optimized = planner.findBestExp();
+
+        print("AFTER OPTIMIZATION", optimized);
+
         System.out.println("optimized cost: " + optimized.getCluster().getMetadataQuery().getCumulativeCost(optimized));
+        
         return optimized;
+    }
+
+    private void print(String header, RelNode relTree) {
+        StringWriter sw = new StringWriter();
+
+        sw.append(header).append(":").append("\n");
+
+        //RelWriterImpl relWriter = new RelWriterImpl(new PrintWriter(sw), SqlExplainLevel.ALL_ATTRIBUTES, true);
+        BOSSRelWriter relWriter = new BOSSRelWriter(new PrintWriter(sw));
+
+        relTree.explain(relWriter);
+        System.out.println(sw.toString());
     }
 }

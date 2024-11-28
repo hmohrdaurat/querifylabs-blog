@@ -38,7 +38,7 @@ public class CustomCostPlanner extends VolcanoPlanner {
       return costFactory.makeInfiniteCost();
     }
     RelOptCost cost = mq.getNonCumulativeCost(rel);
-    System.err.println("rel: " + rel.toString() + ", card=" + String.valueOf(cost.getRows())/*+ ", cost=" + String.valueOf(cost.getCpu())*/);
+    //System.err.println("rel: " + rel.toString() + ", card=" + String.valueOf(cost.getRows())/*+ ", cost=" + String.valueOf(cost.getCpu())*/);
     if (!zeroCost.isLt(cost)) {
       // cost must be positive, so nudge it
       cost = costFactory.makeTinyCost();

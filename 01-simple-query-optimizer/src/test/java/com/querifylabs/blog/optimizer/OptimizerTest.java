@@ -17,6 +17,7 @@ import org.apache.calcite.rel.RelCollation;
 import org.apache.calcite.rel.RelCollationImpl;
 import org.apache.calcite.rel.RelCollationTraitDef;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.externalize.RelWriterImpl;
 import org.apache.calcite.rel.rules.AggregateReduceFunctionsRule;
 import org.apache.calcite.rel.rules.AggregateUnionTransposeRule;
@@ -29,6 +30,7 @@ import org.apache.calcite.sql.SqlExplainLevel;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.sql.validate.SqlValidator;
+import org.apache.calcite.tools.RelBuilder;
 import org.apache.calcite.tools.RuleSet;
 import org.apache.calcite.tools.RuleSets;
 import org.apache.calcite.util.TestUtil;
@@ -38,6 +40,12 @@ import java.io.PrintWriter;
 import java.io.StringWriter;
 
 public class OptimizerTest {
+
+    private Optimizer createOptimizer() {
+        TpchSchema tpchSchema = new TpchSchema(10.0, 1, 1, true);
+        return Optimizer.create("tpch", tpchSchema);
+    }
+
     @Test
     public void test_tpch_q6() throws Exception {
         String sql =
@@ -78,6 +86,8 @@ public class OptimizerTest {
         "				and L_PARTKEY = P_PARTKEY                                                          \n" +
         "				and PS_PARTKEY = P_PARTKEY                                                         \n" +
         "				and PS_SUPPKEY = S_SUPPKEY                                                         \n" +
+        "				and O_ORDERKEY = L_ORDERKEY                                                        \n" +
+        "				and S_NATIONKEY = N_NATIONKEY                                                      \n" +
         "				and P_NAME like '%green%'                                                          \n" +
         "        ) as profit                                                                               \n" +
         "	group by                                                                                       \n" +
@@ -89,17 +99,133 @@ public class OptimizerTest {
         test_query(sql);
     }
 
-    private void test_query(String sql) throws Exception {
-        TpchSchema tpchSchema = new TpchSchema(1.0, 1, 1, true);
-        Optimizer optimizer = Optimizer.create("tpch", tpchSchema);
+    // QO able to use a Sort-Merge Join for this query
+    @Test
+    public void test_sort_example_A() throws Exception {
+        String sql =
+        "   select                                                                            \n" +
+        "           C_NAME as name,                                                           \n" +
+        "           O_ORDERDATE                                                               \n" +
+        "   from                                                                              \n" +
+        "           ORDERS,                                                                   \n" +
+        "           CUSTOMER                                                                  \n" +
+        "   where                                                                             \n" +
+        "	        O_CUSTKEY = C_CUSTKEY                                                     \n" +
+        "	order by                                                                          \n" +
+        "			O_CUSTKEY asc";
+        test_query(sql);
+    }
 
+    // QO unable to use a Sort-Merge Join (because asc/desc mismatch)
+    @Test
+    public void test_sort_example_B() throws Exception {
+        String sql =
+        "   select                                                                            \n" +
+        "           C_NAME as name,                                                           \n" +
+        "           O_ORDERDATE                                                               \n" +
+        "   from                                                                              \n" +
+        "           ORDERS,                                                                   \n" +
+        "           CUSTOMER                                                                  \n" +
+        "   where                                                                             \n" +
+        "	        O_CUSTKEY = C_CUSTKEY                                                     \n" +
+        "	order by                                                                          \n" +
+        "			O_CUSTKEY desc";
+        test_query(sql);
+    }
+
+    // QO rightfully not using Sort-Merge Join (because key is different from the order attribute)
+    @Test
+    public void test_sort_example_C() throws Exception {
+        String sql =
+        "   select                                                                            \n" +
+        "           C_NAME as name,                                                           \n" +
+        "           O_ORDERDATE                                                               \n" +
+        "   from                                                                              \n" +
+        "           ORDERS,                                                                   \n" +
+        "           CUSTOMER                                                                  \n" +
+        "   where                                                                             \n" +
+        "	        O_CUSTKEY = C_CUSTKEY                                                     \n" +
+        "	order by                                                                          \n" +
+        "			O_ORDERKEY";
+        test_query(sql);
+    }
+
+    // QO unable to use Sort-Merge Join (because key is a subset of the order attributes)
+    @Test
+    public void test_sort_example_D() throws Exception {
+        String sql =
+        "   select                                                                            \n" +
+        "           C_NAME as name,                                                           \n" +
+        "           O_ORDERDATE                                                               \n" +
+        "   from                                                                              \n" +
+        "           ORDERS,                                                                   \n" +
+        "           CUSTOMER                                                                  \n" +
+        "   where                                                                             \n" +
+        "	        O_CUSTKEY = C_CUSTKEY                                                     \n" +
+        "	order by                                                                          \n" +
+        "			O_CUSTKEY, O_ORDERKEY";
+        test_query(sql);
+    }
+    
+    // QO able to use a Sort-Merge Join for this query
+    @Test
+    public void test_sort_larger_A() throws Exception {
+        String sql =
+        "   select                                                                            \n" +
+        "           O_ORDERKEY,                                                               \n" +
+        "           O_ORDERDATE                                                               \n" +
+        "   from                                                                              \n" +
+        "           ORDERS,                                                                   \n" +
+        "           LINEITEM                                                                  \n" +
+        "   where                                                                             \n" +
+        "	        O_ORDERKEY = L_ORDERKEY                                                   \n" +
+        "	order by                                                                          \n" +
+        "			L_ORDERKEY asc";
+        test_query(sql);
+    }
+    
+    // QO rightfully not using Sort-Merge Join (because key is different from the order attribute)
+    @Test
+    public void test_sort_larger_C() throws Exception {
+        String sql =
+        "   select                                                                            \n" +
+        "           O_ORDERKEY,                                                               \n" +
+        "           O_ORDERDATE                                                               \n" +
+        "   from                                                                              \n" +
+        "           ORDERS,                                                                   \n" +
+        "           LINEITEM                                                                  \n" +
+        "   where                                                                             \n" +
+        "	        O_ORDERKEY = L_ORDERKEY                                                   \n" +
+        "	order by                                                                          \n" +
+        "			O_CUSTKEY asc";
+        test_query(sql);
+    }
+
+    @Test
+    public void test_manual_query() throws Exception {
+        Optimizer optimizer = createOptimizer();
+        RelBuilder builder = optimizer.builder();
+        RelNode opTree = builder.scan("ORDERS")
+        .scan("CUSTOMER")
+        .join(JoinRelType.INNER, builder.equals(
+            builder.field(2, 0, "O_CUSTKEY"), 
+            builder.field(2, 1, "C_CUSTKEY")))
+        .sort(builder.field("O_CUSTKEY"))
+        .project(builder.field("C_NAME"), 
+                 builder.field("O_ORDERDATE"))
+        .build();
+        test_query(opTree, optimizer);
+    }
+
+    private void test_query(String sql) throws Exception {
+        Optimizer optimizer = createOptimizer();
         SqlNode sqlTree = optimizer.parse(sql);
         SqlNode validatedSqlTree = optimizer.validate(sqlTree);
         RelNode relTree = optimizer.convert(validatedSqlTree);
-
-        print("AFTER CONVERSION", relTree);
-
+        test_query(relTree, optimizer);
+    }
         
+    private void test_query(RelNode relTree, Optimizer optimizer) throws Exception {
         /*if(true) {
             SqlValidator.Config validatorConfig = SqlValidator.Config.DEFAULT
                 .withLenientOperatorLookup(config.lenientOperatorLookup())
@@ -156,19 +282,5 @@ public class OptimizerTest {
             relTree.getTraitSet().plus(EnumerableConvention.INSTANCE),
             rules
         );
-
-        print("AFTER OPTIMIZATION", optimizerRelTree);
-    }
-
-    private void print(String header, RelNode relTree) {
-        StringWriter sw = new StringWriter();
-
-        sw.append(header).append(":").append("\n");
-
-        RelWriterImpl relWriter = new RelWriterImpl(new PrintWriter(sw), SqlExplainLevel.ALL_ATTRIBUTES, true);
-
-        relTree.explain(relWriter);
-
-        System.out.println(sw.toString());
     }
 }
