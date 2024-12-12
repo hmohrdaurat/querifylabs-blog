@@ -5,60 +5,44 @@ import org.apache.calcite.avatica.util.Casing;
 import org.apache.calcite.config.CalciteConnectionConfig;
 import org.apache.calcite.config.CalciteConnectionConfigImpl;
 import org.apache.calcite.config.CalciteConnectionProperty;
-import org.apache.calcite.interpreter.Bindables;
 import org.apache.calcite.jdbc.CalciteSchema;
 import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
 import org.apache.calcite.plan.Contexts;
 import org.apache.calcite.plan.ConventionTraitDef;
 import org.apache.calcite.plan.RelOptCluster;
-import org.apache.calcite.plan.RelOptCostImpl;
 import org.apache.calcite.plan.RelOptPlanner;
 import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.plan.RelTraitSet;
-import org.apache.calcite.plan.hep.HepPlanner;
-import org.apache.calcite.plan.hep.HepProgram;
-import org.apache.calcite.plan.hep.HepProgramBuilder;
-import org.apache.calcite.plan.volcano.VolcanoPlanner;
 import org.apache.calcite.prepare.CalciteCatalogReader;
 import org.apache.calcite.prepare.Prepare;
 import org.apache.calcite.rel.RelCollationTraitDef;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelRoot;
-import org.apache.calcite.rel.externalize.RelWriterImpl;
 import org.apache.calcite.rel.rules.CoreRules;
+import org.apache.calcite.rel.rules.JoinPushThroughJoinRule;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.schema.Schema;
-import org.apache.calcite.schema.Table;
-import org.apache.calcite.sql.SqlExplainLevel;
-import org.apache.calcite.sql.SqlFilterOperator;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlOperatorTable;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.parser.SqlParser;
 import org.apache.calcite.sql.util.ChainedSqlOperatorTable;
-import org.apache.calcite.sql.util.ListSqlOperatorTable;
 import org.apache.calcite.sql.validate.SqlValidator;
 import org.apache.calcite.sql.validate.SqlValidatorUtil;
 import org.apache.calcite.sql2rel.SqlToRelConverter;
 import org.apache.calcite.sql2rel.StandardConvertletTable;
-import org.apache.calcite.test.CalciteAssert;
-import org.apache.calcite.tools.FrameworkConfig;
-import org.apache.calcite.tools.Frameworks;
-import org.apache.calcite.tools.Program;
-import org.apache.calcite.tools.Programs;
 import org.apache.calcite.tools.RelBuilder;
 import org.apache.calcite.tools.RuleSet;
-import org.apache.calcite.tools.RuleSets;
+
+import com.google.common.collect.ImmutableList;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
-import java.util.Map;
 
 public class Optimizer {
 
@@ -81,6 +65,15 @@ public class Optimizer {
         this.planner = planner;
         this.catalogReader = catalogReader;
     }
+    
+  static final List<RelOptRule> NEEDED_BASE_RULES = ImmutableList.of(
+      //CoreRules.PROJECT_MERGE,
+      CoreRules.FILTER_INTO_JOIN,
+      CoreRules.JOIN_COMMUTE,
+      //CoreRules.JOIN_ASSOCIATE,
+      JoinPushThroughJoinRule.RIGHT,
+      JoinPushThroughJoinRule.LEFT
+    );
 
     public static Optimizer create(String schemaName, Schema schema) {
         RelDataTypeFactory typeFactory = new JavaTypeFactoryImpl();
@@ -99,7 +92,7 @@ public class Optimizer {
             config
         );
 
-        SqlOperatorTable operatorTable = ChainedSqlOperatorTable.of(SqlStdOperatorTable.instance());
+        SqlOperatorTable operatorTable = /*ChainedSqlOperatorTable.of*/(SqlStdOperatorTable.instance());
         //ListSqlOperatorTable opList = new ListSqlOperatorTable();
         //opList.add(new SqlFilterOperator());
         //SqlOperatorTable operatorTable = opList;
@@ -116,13 +109,20 @@ public class Optimizer {
         planner.addRelTraitDef(ConventionTraitDef.INSTANCE);
         planner.addRelTraitDef(RelCollationTraitDef.INSTANCE);
         RelOptUtil.registerDefaultRules(planner, false, false);
+        //NEEDED_BASE_RULES.forEach(planner::addRule);
+        planner.removeRule(CoreRules.PROJECT_MERGE);
+        planner.removeRule(CoreRules.JOIN_ASSOCIATE);
+        EnumerableRules.ENUMERABLE_RULES.forEach(planner::addRule);
+        planner.addRule(EnumerableRules.TO_INTERPRETER);
+        //planner.removeRule(EnumerableRules.ENUMERABLE_JOIN_RULE);
+        //planner.addRule(CustomJoinRule.DEFAULT_CONFIG.toRule(CustomJoinRule.class));
 
         RelOptCluster cluster = RelOptCluster.create(planner, new RexBuilder(typeFactory));
 
-        SqlToRelConverter.Config converterConfig = SqlToRelConverter.configBuilder()
+        SqlToRelConverter.Config converterConfig = SqlToRelConverter.config()
             .withTrimUnusedFields(true)
             .withExpand(false) // https://issues.apache.org/jira/browse/CALCITE-1045
-            .build();
+            ;//.build();
 
         SqlToRelConverter converter = new SqlToRelConverter(
             null,
@@ -183,14 +183,14 @@ public class Optimizer {
             planner.addRule(rule);
         }
 
-        //planner.removeRule(EnumerableRules.ENUMERABLE_MERGE_JOIN_RULE);
+        planner.removeRule(EnumerableRules.ENUMERABLE_MERGE_JOIN_RULE);
         //planner.removeRule(EnumerableRules.ENUMERABLE_JOIN_RULE);
 
         // for tests
-        planner.removeRule(CoreRules.SORT_JOIN_TRANSPOSE);
+        //planner.removeRule(CoreRules.SORT_JOIN_TRANSPOSE);
         //planner.removeRule(CoreRules.SORT_PROJECT_TRANSPOSE);
-        planner.removeRule(CoreRules.SORT_REMOVE);
-        planner.removeRule(CoreRules.SORT_JOIN_COPY);
+        //planner.removeRule(CoreRules.SORT_REMOVE);
+        //planner.removeRule(CoreRules.SORT_JOIN_COPY);
         
         print("LOGICAL PLAN", node);
 
@@ -200,7 +200,40 @@ public class Optimizer {
 
         print("AFTER OPTIMIZATION", optimized);
 
-        System.out.println("optimized cost: " + optimized.getCluster().getMetadataQuery().getCumulativeCost(optimized));
+        //System.out.println("optimized cost: " + optimized.getCluster().getMetadataQuery().getCumulativeCost(optimized));
+        
+        return optimized;
+    }
+
+    public RelNode optimizeNoDebugOutput(RelNode node, RelTraitSet requiredTraitSet) {
+        /*Program program = Programs.of(RuleSets.ofList(rules));
+
+        return program.run(
+            planner,
+            node,
+            requiredTraitSet,
+            Collections.emptyList(),
+            Collections.emptyList()
+        );*/
+
+        planner.removeRule(EnumerableRules.ENUMERABLE_MERGE_JOIN_RULE);
+        //planner.removeRule(EnumerableRules.ENUMERABLE_JOIN_RULE);
+
+        // for tests
+        //planner.removeRule(CoreRules.SORT_JOIN_TRANSPOSE);
+        //planner.removeRule(CoreRules.SORT_PROJECT_TRANSPOSE);
+        //planner.removeRule(CoreRules.SORT_REMOVE);
+        //planner.removeRule(CoreRules.SORT_JOIN_COPY);
+        
+        //print("LOGICAL PLAN", node);
+
+        RelNode newRoot = planner.changeTraits(node, requiredTraitSet);
+        planner.setRoot(newRoot);
+        RelNode optimized = planner.findBestExp();
+
+        //print("AFTER OPTIMIZATION", optimized);
+
+        //System.out.println("optimized cost: " + optimized.getCluster().getMetadataQuery().getCumulativeCost(optimized));
         
         return optimized;
     }

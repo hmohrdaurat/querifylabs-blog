@@ -2,42 +2,29 @@ package com.querifylabs.blog.optimizer;
 
 import org.apache.calcite.adapter.enumerable.EnumerableConvention;
 import org.apache.calcite.adapter.enumerable.EnumerableRules;
-import org.apache.calcite.adapter.enumerable.EnumerableHashJoin;
 import org.apache.calcite.adapter.tpch.TpchSchema;
-import org.apache.calcite.plan.Contexts;
-import org.apache.calcite.plan.ConventionTraitDef;
-import org.apache.calcite.plan.RelOptCluster;
-import org.apache.calcite.plan.RelOptCostImpl;
-import org.apache.calcite.plan.RelOptRules;
-import org.apache.calcite.plan.RelOptUtil;
-import org.apache.calcite.plan.RelTraitSet;
-import org.apache.calcite.plan.volcano.AbstractConverter;
-import org.apache.calcite.plan.volcano.VolcanoPlanner;
-import org.apache.calcite.rel.RelCollation;
-import org.apache.calcite.rel.RelCollationImpl;
-import org.apache.calcite.rel.RelCollationTraitDef;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.JoinRelType;
-import org.apache.calcite.rel.externalize.RelWriterImpl;
-import org.apache.calcite.rel.rules.AggregateReduceFunctionsRule;
-import org.apache.calcite.rel.rules.AggregateUnionTransposeRule;
 import org.apache.calcite.rel.rules.CoreRules;
-import org.apache.calcite.rel.rules.FilterJoinRule;
-import org.apache.calcite.rel.rules.FilterSetOpTransposeRule;
-import org.apache.calcite.rel.rules.PruneEmptyRules;
-import org.apache.calcite.rel.rules.ReduceExpressionsRule;
 import org.apache.calcite.sql.SqlExplainLevel;
 import org.apache.calcite.sql.SqlNode;
-import org.apache.calcite.sql.type.SqlTypeName;
-import org.apache.calcite.sql.validate.SqlValidator;
 import org.apache.calcite.tools.RelBuilder;
 import org.apache.calcite.tools.RuleSet;
 import org.apache.calcite.tools.RuleSets;
-import org.apache.calcite.util.TestUtil;
 import org.junit.Test;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Scanner;
+import java.util.Set;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
 
 public class OptimizerTest {
 
@@ -282,5 +269,260 @@ public class OptimizerTest {
             relTree.getTraitSet().plus(EnumerableConvention.INSTANCE),
             rules
         );
+    }
+
+    // https://stackoverflow.com/a/10305419
+    public static <E> List<List<E>> possiblePermutations(List<E> original) {
+        if (original.isEmpty()) {
+            List<List<E>> result = new ArrayList<>();
+            result.add(new ArrayList<>());
+            return result;
+        }
+        E firstElement = original.remove(0);
+        List<List<E>> returnValue = new ArrayList<>();
+        List<List<E>> permutations = possiblePermutations(original);
+        for (List<E> smallerPermutated : permutations) {
+            for (int index = 0; index <= smallerPermutated.size(); index++) {
+                List<E> temp = new ArrayList<>(smallerPermutated);
+                temp.add(index, firstElement);
+                returnValue.add(temp);
+            }
+        }
+        return returnValue;
+    }
+
+    private List<String> createFromClausePermutations(String fromClause) {
+        List<String> tables = new ArrayList<String>(Arrays.asList(fromClause.split(",")));
+        List<List<String>> tablePermutations = possiblePermutations(tables);
+        List<String> permutations = new ArrayList<>();
+        for(List<String> permutation : tablePermutations) {
+            permutations.add(String.join(", ", permutation));
+        }
+        return permutations;
+    }
+
+    private List<String> generatePermutations(String sql) throws Exception {
+        List<String> permutations = new ArrayList<>();
+
+        // get permutations for the first sub-query
+        int startIndexOfSubQuery = sql.indexOf("(");
+        int endIndexOfSubQuery = -1;
+        if(startIndexOfSubQuery >= 0) {
+            // find matching closing bracket
+            int bracketDepth = 0;
+            for(int index = startIndexOfSubQuery + 1; index < sql.length(); index++) {
+                char c = sql.charAt(index);
+                if(c == '(') {
+                    bracketDepth++;
+                } else if(c == ')') {
+                    if(bracketDepth == 0) {
+                        endIndexOfSubQuery = index;
+                        break;
+                    }
+                    bracketDepth--;
+                }
+            }
+
+            if(endIndexOfSubQuery >= 0) {
+                String subQuery = sql.substring(startIndexOfSubQuery + 1, endIndexOfSubQuery);
+                List<String> subPermutations = generatePermutations(subQuery);
+                String prefix = sql.substring(0, startIndexOfSubQuery + 1);
+                for (int i = 0; i < subPermutations.size(); i++) {
+                    subPermutations.set(i, prefix + subPermutations.get(i));
+                }
+
+                // get permutations for the rest of the query
+                // + create combinations from the first sub-query's permutations
+                if(endIndexOfSubQuery < sql.length()) {
+                    String restQuery = sql.substring(endIndexOfSubQuery);
+                    List<String> restPermutations = generatePermutations(restQuery);
+                    for (int i = 0; i < subPermutations.size(); i++) {
+                        for (int j = 0; j < restPermutations.size(); j++) {
+                            permutations.add(i, subPermutations.get(i) + restPermutations.get(j));
+                        }
+                    }
+                    return permutations;
+                } else {
+                    return subPermutations;
+                }
+            }
+        }
+
+        // check from clause
+        int startIndexOfFromClause = sql.toLowerCase().indexOf("from");
+        if(startIndexOfFromClause < 0) {
+            permutations.add(sql);
+            return permutations;
+        }
+        int endIndexOfFromClause = sql.toLowerCase().indexOf(" where");
+        if(endIndexOfFromClause < 0) {
+            endIndexOfFromClause = sql.length();
+        }
+        String fromClause = sql.substring(startIndexOfFromClause + 5, endIndexOfFromClause);
+        List<String> fromClausePermutations = createFromClausePermutations(fromClause);
+        for(String fromClausePermutation : fromClausePermutations) {
+            String prefix = sql.substring(0, startIndexOfFromClause + 5);
+            String suffix = sql.substring(endIndexOfFromClause);
+            permutations.add(prefix + fromClausePermutation + suffix);
+        }
+        return permutations;
+    }
+
+    List<String> generatePhysicalPlans(String BOSSPlan) {
+        List<String> plans = new ArrayList<>();
+        int startIndexOfSubQuery = BOSSPlan.indexOf("(HashJoin");
+        if(startIndexOfSubQuery < 0) {
+            plans.add(BOSSPlan);
+            return plans;
+        }
+        String before = BOSSPlan.substring(0, startIndexOfSubQuery);
+        String after = BOSSPlan.substring(startIndexOfSubQuery + 9);
+        List<String> afterCandidates = generatePhysicalPlans(after);
+        for(String afterCandidate : afterCandidates) {
+            plans.add(before + "(HashJoin" + afterCandidate);
+            plans.add(before + "(SortMergeJoin" + afterCandidate);
+            plans.add(before + "(NestedLoopJoin" + afterCandidate);
+        }
+        return plans;
+    }
+
+    private List<String> generateBOSSQueryPlans(String sql) throws Exception {
+        Set<String> plans = new HashSet<String>(); // make sure there is no duplicate plan
+
+        // TODO: parse "From" tables and create all permutations
+        sql = sql.replaceAll("\\s+", " ").replaceAll("(\\r|\\n)", "");
+        List<String> sqlPermutations = /*new ArrayList<String>(); sqlPermutations.add(sql); //*/generatePermutations(sql);
+        System.err.println("number of permutations: " + sqlPermutations.size());
+
+        //String last = sqlPermutations.get(sqlPermutations.size() - 1);
+        //sqlPermutations.clear();
+        //sqlPermutations.add(last);
+
+        //String first = sqlPermutations.get(0);
+        //sqlPermutations.clear();
+        //sqlPermutations.add(first);
+
+        Optimizer optimizer = createOptimizer();        
+        for(String sqlPermutation : sqlPermutations) {
+            // logical plan
+            SqlNode sqlTree = optimizer.parse(sqlPermutation);
+            SqlNode validatedSqlTree = optimizer.validate(sqlTree);
+            RelNode relTree = optimizer.convert(validatedSqlTree);
+    
+            // physical plan (but allow only one sort of join)
+            RelNode optimizerRelTree = optimizer.optimizeNoDebugOutput(
+                relTree,
+                relTree.getTraitSet().plus(EnumerableConvention.INSTANCE)
+            );
+
+            StringWriter sw = new StringWriter();
+            BOSSRelWriter relWriter = new BOSSRelWriter(new PrintWriter(sw), SqlExplainLevel.NO_ATTRIBUTES, false);
+            //RelWriterImpl relWriter = new RelWriterImpl(new PrintWriter(sw), SqlExplainLevel.ALL_ATTRIBUTES, true);
+            optimizerRelTree.explain(relWriter);
+
+            // drop any NestedLoopJoin, since Calcite use them for cross joins (which are definitely plans we want to prune)
+            if(sw.toString().contains("NestedLoopJoin")) {
+                continue;
+            }
+
+            // generate all plan candidate with different physical ops for each op (only joins for now)
+            List<String> candidates = generatePhysicalPlans(sw.toString());
+
+            for(String candidate : candidates) {
+                plans.add(candidate);
+            }
+        }
+
+        System.err.println("number of unique plans: " + plans.size());
+
+        return new ArrayList<>(plans);
+    }
+
+    @Test
+    public void testGeneratePlans() throws Exception {
+        String sql =
+        "select                                                                                            \n" +
+        "        nation,                                                                                   \n" +
+        "        o_year,                                                                                   \n" +
+        "        sum(amount) as sum_profit                                                                 \n" +
+        "	from                                                                                           \n" +
+        "        (                                                                                         \n" +
+        "                select                                                                            \n" +
+        "                        N_NAME as nation,                                                         \n" +
+        "                        year(O_ORDERDATE) as o_year,                                              \n" +
+        "                        L_EXTENDEDPRICE * (1 - L_DISCOUNT) - PS_SUPPLYCOST * L_QUANTITY as amount \n" +
+        "                from                                                                              \n" +
+        "                        PART,                                                                     \n" +
+        "                        SUPPLIER,                                                                 \n" +
+        "                        LINEITEM,                                                                 \n" +
+        "                        PARTSUPP,                                                                 \n" +
+        "                        ORDERS,                                                                   \n" +
+        "                        NATION                                                                    \n" +
+        "                where                                                                             \n" +
+        "				L_SUPPKEY = S_SUPPKEY                                                              \n" +
+        "				and L_PARTKEY = P_PARTKEY                                                          \n" +
+        "				and PS_PARTKEY = P_PARTKEY                                                         \n" +
+        "				and PS_SUPPKEY = S_SUPPKEY                                                         \n" +
+        "				and O_ORDERKEY = L_ORDERKEY                                                        \n" +
+        "				and S_NATIONKEY = N_NATIONKEY                                                      \n" +
+        //"				and P_NAME like '%green%'                                                          \n" +
+        "        ) as profit                                                                               \n" +
+        "	group by                                                                                       \n" +
+        "			nation,                                                                                \n" +
+        "			o_year                                                                                 \n" +
+        "	order by                                                                                       \n" +
+        "			nation,                                                                                \n" +
+        "			o_year desc";
+
+        List<String> plans = generateBOSSQueryPlans(sql);
+        for (String plan : plans) {
+            System.out.println(plan);
+        }
+    }
+    
+    @Test
+    public void testGeneratePlansFromAndToCSV() throws Exception {
+        String filedir = "C:\\Users\\ham219\\Downloads\\";
+        List<String> filenames = Arrays.asList(
+            "tpch_sql_queries.csv"
+        );
+        
+        String outfilename = "tpch_boss_query_plans.csv";
+
+        String line = "";  
+        String separator = ",";
+
+        try   
+        {
+            PrintWriter pw = new PrintWriter(filedir + outfilename);
+
+            int queryIndex = 1;
+            for(String filename : filenames) {
+                BufferedReader br = new BufferedReader(new FileReader(filedir + filename));  
+                while ((line = br.readLine()) != null)
+                {  
+                    if(queryIndex == 8 || queryIndex == 11 || queryIndex == 15) {
+                        queryIndex++;
+                        continue;   // not working. TODO: investigate
+                                    // Q8: crash (join many tables)
+                                    // Q11: error while parsing 'VALUE'
+                                    // Q15: error parsing 'CREATE' (calcite not handling views?)
+                    }
+                    List<String> plans = generateBOSSQueryPlans(line.substring(0, line.length() - 1));
+                    for (String plan : plans) {
+                        pw.println(queryIndex + separator + plan);
+                    }
+                    pw.flush();
+
+                    queryIndex++;
+                }
+                br.close();
+            }
+            pw.close();
+        }   
+        catch (IOException e)   
+        {  
+            e.printStackTrace();  
+        }  
     }
 }
