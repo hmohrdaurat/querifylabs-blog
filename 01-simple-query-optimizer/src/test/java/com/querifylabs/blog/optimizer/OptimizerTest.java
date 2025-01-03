@@ -11,6 +11,7 @@ import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.tools.RelBuilder;
 import org.apache.calcite.tools.RuleSet;
 import org.apache.calcite.tools.RuleSets;
+import org.apache.commons.lang.ObjectUtils.Null;
 import org.junit.Test;
 
 import java.io.PrintWriter;
@@ -21,10 +22,12 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Scanner;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
+import com.google.common.collect.Streams;
 
 public class OptimizerTest {
 
@@ -439,7 +442,7 @@ public class OptimizerTest {
     }
 
     @Test
-    public void testGeneratePlans() throws Exception {
+    public void testGenerateBOSSPlans() throws Exception {
         String sql =
         "select                                                                                            \n" +
         "        nation,                                                                                   \n" +
@@ -481,7 +484,7 @@ public class OptimizerTest {
     }
     
     @Test
-    public void testGeneratePlansFromAndToCSV() throws Exception {
+    public void testGenerateBOSSPlansFromAndToCSV() throws Exception {
         String filedir = "C:\\Users\\ham219\\Downloads\\";
         List<String> filenames = Arrays.asList(
             "tpch_sql_queries.csv"
@@ -519,6 +522,209 @@ public class OptimizerTest {
                 br.close();
             }
             pw.close();
+        }   
+        catch (IOException e)   
+        {  
+            e.printStackTrace();  
+        }  
+    }
+
+    final String[] postgresScanTypes = {"SeqScan", "IndexOnlyScan"};
+    final String[] postgresJoinTypes = {"NestLoop", "HashJoin", "MergeJoin"};
+
+    private List<String> createFromClausePermutationHeaders(String fromClause) {
+        List<String> permutations = new ArrayList<>();
+        // split commas in from clause
+        List<String> tables = new ArrayList<String>(Arrays.asList(fromClause.split(",")));
+        if(tables.size() < 2) {
+            return permutations;
+        }
+        // keep only table aliases
+        tables = tables
+            .stream()
+            .map(str -> Streams.findLast(Arrays.stream(str.split(" "))).orElse(str))
+            .collect(Collectors.toList());
+        // get permutations for each scan type for each table
+        List<String> scanPermutations = null;
+        /*for(String table : tables) {
+            List<String> newPermutations = new ArrayList<>();
+            for(String scanType : postgresScanTypes) {
+                newPermutations.add(scanType + "(" + table + ")");
+            }
+            if(scanPermutations == null) {
+                scanPermutations = newPermutations;
+                continue;
+            }
+            List<String> combinedPermutations = new ArrayList<>();
+            for(String prevPermutation : scanPermutations) {
+                for(String newPermutation : newPermutations) {
+                    combinedPermutations.add(prevPermutation + " " + newPermutation);
+                }
+            }
+            scanPermutations = combinedPermutations;
+        }
+        */
+        // get permutation of tables for join ordering + add variants for join types
+        List<List<String>> tablePermutations = possiblePermutations(tables);
+        for(List<String> permutation : tablePermutations) {
+            String[] orderHint = { permutation.get(0) };
+            // get join type permutation for each join pair
+            final List<String> allOtherPermutations = new ArrayList<>();
+            if(scanPermutations != null) {
+                allOtherPermutations.addAll(scanPermutations);
+            }
+            permutation.stream().reduce((a, b) -> {
+                List<String> newPermutations = new ArrayList<>();
+                for(String scanType : postgresJoinTypes) {
+                    newPermutations.add(scanType + "(" + a + " " + b + ")");
+                }
+                if(allOtherPermutations.isEmpty()) {
+                    allOtherPermutations.addAll(newPermutations);
+                    return a + " " + b;
+                }
+                List<String> combinedPermutations = new ArrayList<>();
+                for(String prevPermutation : allOtherPermutations) {
+                    for(String newPermutation : newPermutations) {
+                        combinedPermutations.add(prevPermutation + " " + newPermutation);
+                    }
+                }
+                allOtherPermutations.clear();
+                allOtherPermutations.addAll(combinedPermutations);
+                return a + " " + b;
+            });
+            // now get next join order permutation
+            permutation.stream().skip(1).forEach(
+                table -> orderHint[0] = "( " + table + " " + orderHint[0] + " )");
+            orderHint[0] = "Leading( " + orderHint[0] + " )";
+            if(allOtherPermutations.isEmpty()) {
+                permutations.add(orderHint[0]);
+                continue;
+            }
+            for(String otherPermutation : allOtherPermutations) {
+                permutations.add(otherPermutation + " " + orderHint[0]);
+            }
+        }
+        return permutations;
+    }
+
+    private List<String> generatePermutationHeaders(String sql) throws Exception {
+        List<String> permutations = new ArrayList<>();
+
+        // get permutations for the first sub-query
+        int startIndexOfSubQuery = sql.indexOf("(");
+        int endIndexOfSubQuery = -1;
+        if(startIndexOfSubQuery >= 0) {
+            // find matching closing bracket
+            int bracketDepth = 0;
+            for(int index = startIndexOfSubQuery + 1; index < sql.length(); index++) {
+                char c = sql.charAt(index);
+                if(c == '(') {
+                    bracketDepth++;
+                } else if(c == ')') {
+                    if(bracketDepth == 0) {
+                        endIndexOfSubQuery = index;
+                        break;
+                    }
+                    bracketDepth--;
+                }
+            }
+
+            if(endIndexOfSubQuery >= 0) {
+                String subQuery = sql.substring(startIndexOfSubQuery + 1, endIndexOfSubQuery);
+                List<String> subPermutations = generatePermutationHeaders(subQuery);
+                String prefix = sql.substring(0, startIndexOfSubQuery + 1);
+                for (int i = 0; i < subPermutations.size(); i++) {
+                    subPermutations.set(i, prefix + subPermutations.get(i));
+                }
+
+                // get permutations for the rest of the query
+                // + create combinations from the first sub-query's permutations
+                if(endIndexOfSubQuery < sql.length()) {
+                    String restQuery = sql.substring(endIndexOfSubQuery);
+                    List<String> restPermutations = generatePermutationHeaders(restQuery);
+                    if(subPermutations.isEmpty()) {
+                        return restPermutations;
+                    }
+                    for (int i = 0; i < subPermutations.size(); i++) {
+                        for (int j = 0; j < restPermutations.size(); j++) {
+                            permutations.add(i, subPermutations.get(i) + " " + restPermutations.get(j));
+                        }
+                    }
+                    return permutations;
+                }
+                return subPermutations;
+            }
+        }
+
+        // check from clause
+        int startIndexOfFromClause = sql.toLowerCase().indexOf("from");
+        if(startIndexOfFromClause < 0) {
+            return permutations;
+        }
+        int endIndexOfFromClause = sql.toLowerCase().indexOf(" where");
+        if(endIndexOfFromClause < 0) {
+            endIndexOfFromClause = sql.length();
+        }
+        String fromClause = sql.substring(startIndexOfFromClause + 5, endIndexOfFromClause);
+        permutations = createFromClausePermutationHeaders(fromClause);
+        return permutations;
+    }
+
+    private List<String> generatePostgresPlans(String sql) throws Exception {
+        Set<String> plans = new HashSet<String>(); // make sure there is no duplicate plans
+
+        // TODO: parse "From" tables and create all permutations
+        sql = sql.replaceAll("\\s+", " ").replaceAll("(\\r|\\n)", "");
+        List<String> permutationsHeaders = generatePermutationHeaders(sql);
+
+        for(String permutationHeader : permutationsHeaders) {
+            plans.add("/*+ " + permutationHeader + " */ " + sql);
+        }
+        if(permutationsHeaders.isEmpty()) {
+            plans.add(sql);
+        }
+
+        System.err.println("number of unique plans: " + plans.size());
+
+        return new ArrayList<>(plans);
+    }
+
+    @Test
+    public void testGeneratePlansForPostgres() throws Exception {
+        String filedir = "D:\\repos\\query_optimizers\\learnedcardinalities\\workloads\\";
+        List<String> filenames = Arrays.asList(
+            "job-light.sql",
+            "scale.sql",
+            "synthetic.sql"
+        );
+        
+        String outSuffix = "_postgres_plans.csv";
+
+        String line = "";  
+        String separator = "\t";
+
+        try   
+        {
+            for(String filename : filenames) {
+                String basename = filename.substring(0, filename.length() - 4);
+                PrintWriter pw = new PrintWriter(filedir + basename + outSuffix);
+
+                int queryIndex = 1;
+
+                BufferedReader br = new BufferedReader(new FileReader(filedir + filename));  
+                while ((line = br.readLine()) != null)
+                {  
+                    List<String> plans = generatePostgresPlans(line.substring(0, line.length() - 1));
+                    for (String plan : plans) {
+                        pw.println(queryIndex + separator + plan);
+                    }
+                    pw.flush();
+
+                    queryIndex++;
+                }
+                br.close();
+                pw.close();
+            }
         }   
         catch (IOException e)   
         {  
